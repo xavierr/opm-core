@@ -47,6 +47,8 @@ namespace WellsManagerDetail
 
     } // namespace InjectionControl
 
+
+
 double computeWellIndex(const double radius,
                         const std::array<double, 3>& cubical,
                         const double* cell_permeability,
@@ -97,6 +99,26 @@ getCubeDim(const C2F& c2f,
     return cube;
 }
 } // end namespace WellsManagerDetail
+
+
+
+
+
+namespace
+{
+    class ReorderHelper {
+    public:
+        Opm::PerfData pd;
+        double depth;
+        
+        bool operator< (ReorderHelper other) const {
+            return depth < other.depth;
+        };
+    };
+}
+
+
+
 
 namespace Opm
 {
@@ -157,35 +179,62 @@ void WellsManager::createWellsFromSpecs(std::vector<WellConstPtr>& wells, size_t
                 const int* cpgdim = cart_dims;
                 int cart_grid_indx = i + cpgdim[0]*(j + cpgdim[1]*k);
                 std::map<int, int>::const_iterator cgit = cartesian_to_compressed.find(cart_grid_indx);
-                if (cgit == cartesian_to_compressed.end()) {
-                        OPM_THROW(std::runtime_error, "Cell with i,j,k indices " << i << ' ' << j << ' '
-                                  << k << " not found in grid (well = " << well->name() << ')');
-                }
-                int cell = cgit->second;
-                PerfData pd;
-                pd.cell = cell;
-                if (completion->getConnectionTransmissibilityFactor() > 0.0) {
-                    pd.well_index = completion->getConnectionTransmissibilityFactor();
-                } else {
-                    double radius = 0.5*completion->getDiameter();
-                    if (radius <= 0.0) {
-                        radius = 0.5*unit::feet;
-                        OPM_MESSAGE("**** Warning: Well bore internal radius set to " << radius);
+                if (cgit != cartesian_to_compressed.end()) {
+                    int cell = cgit->second;
+                    PerfData pd;
+                    pd.cell = cell;
+                    if (completion->getConnectionTransmissibilityFactor() > 0.0) {
+                        pd.well_index = completion->getConnectionTransmissibilityFactor();
+                    } else {
+                        double radius = 0.5*completion->getDiameter();
+                        if (radius <= 0.0) {
+                            radius = 0.5*unit::feet;
+                            OPM_MESSAGE("**** Warning: Well bore internal radius set to " << radius);
+                        }
+
+                        const std::array<double, 3> cubical =
+                            WellsManagerDetail::getCubeDim<3>(c2f, begin_face_centroids, cell);
+                        
+                        const double* cell_perm = &permeability[dimensions*dimensions*cell];
+                        pd.well_index =
+                            WellsManagerDetail::computeWellIndex(radius, cubical, cell_perm,
+                                                                 completion->getSkinFactor(),
+                                                                 completion->getDirection(),
+                                                                 ntg[cell]);
                     }
-
-                    const std::array<double, 3> cubical =
-                        WellsManagerDetail::getCubeDim<3>(c2f, begin_face_centroids, cell);
-
-                    const double* cell_perm = &permeability[dimensions*dimensions*cell];
-                    pd.well_index =
-                        WellsManagerDetail::computeWellIndex(radius, cubical, cell_perm,
-                                                             completion->getSkinFactor(),
-                                                             completion->getDirection(),
-                                                             ntg[cell]);
+                    wellperf_data[well_index].push_back(pd);
                 }
-                wellperf_data[well_index].push_back(pd);
             }
+
+            // Reorder connections by depth
+            std::vector<PerfData>& pds = wellperf_data[well_index];
+            std::vector<ReorderHelper> rhs (pds.size());
+
+            // initialization of rhs
+            std::vector<PerfData>::iterator pd = pds.begin();
+            std::vector<ReorderHelper>::iterator rh = rhs.begin();
+            for (; rh < rhs.end() ; ++rh) {
+                rh->pd = *pd;
+
+                using UgGridHelpers::increment;
+                using UgGridHelpers::getCoordinate;
+                
+                const CC& cc =
+                    increment(begin_cell_centroids,
+                              rh->pd.cell,
+                              dimensions);
+                rh->depth = getCoordinate(cc, 2);
+                ++pd;
+            }
+            std::sort(rhs.begin(), rhs.end());
+            
+            rh = rhs.begin();
+            for (pd = pds.begin(); pd < pds.end(); ++pd, ++rh) {
+                *pd = rh->pd;
+            }
+            
         }
+
         well_index++;
     }
 
